@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, ensure};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -26,12 +27,18 @@ impl NotesStore {
         Ok(PathBuf::from(home).join("Library/Application Support/Claudio Notes"))
     }
 
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn seed_from(&self, src: &Path) -> Result<usize> {
         if !src.is_dir() {
+            self.write_index()?;
             return Ok(0);
         }
         let mut copied = 0;
         copy_tree(src, src, &self.root, &mut copied)?;
+        self.write_index()?;
         Ok(copied)
     }
 
@@ -49,19 +56,14 @@ impl NotesStore {
     }
 
     pub fn write(&self, id: &str, content: &str) -> Result<()> {
-        let path = self.resolve(id)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("md.tmp");
-        fs::write(&tmp, content).with_context(|| format!("write {}", tmp.display()))?;
-        fs::rename(&tmp, &path).with_context(|| format!("rename into {}", path.display()))?;
-        Ok(())
+        self.write_atomic(id, content)?;
+        self.write_index()
     }
 
     pub fn create(&self, title: &str) -> Result<NoteSummary> {
         let id = unique_id(&self.root, title)?;
-        self.write(&id, "")?;
+        self.write_atomic(&id, "")?;
+        self.write_index()?;
         Ok(NoteSummary {
             title: title_from_id(&id),
             id,
@@ -69,13 +71,48 @@ impl NotesStore {
         })
     }
 
-    // ponytail: unlink, not Trash. Wire `trashItem` if restore-from-Trash is missed.
-    #[allow(dead_code)]
+    /// Deletes a note with `remove_file` (not Trash). Empty parent folders are left in place.
     pub fn delete(&self, id: &str) -> Result<()> {
         let path = self.resolve(id)?;
         if path.exists() {
             fs::remove_file(&path).with_context(|| format!("delete {}", path.display()))?;
         }
+        self.write_index()
+    }
+
+    pub fn path_of(&self, id: &str) -> Result<PathBuf> {
+        self.resolve(id)
+    }
+
+    /// Writes `INDEX.md` at the vault root listing every note agents should read.
+    pub fn write_index(&self) -> Result<()> {
+        let mut notes = self.list()?;
+        notes.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut body = String::from("# Index\n\n");
+        if notes.is_empty() {
+            body.push_str("_No notes._\n");
+        } else {
+            for note in &notes {
+                let title = filename_stem(&note.id);
+                let mtime = format_mtime(note.updated);
+                let _ = writeln!(body, "- [{title}]({}) — {mtime}", note.id);
+            }
+        }
+        let path = self.root.join("INDEX.md");
+        let tmp = self.root.join("INDEX.md.tmp");
+        fs::write(&tmp, body).with_context(|| format!("write {}", tmp.display()))?;
+        fs::rename(&tmp, &path).with_context(|| format!("rename into {}", path.display()))?;
+        Ok(())
+    }
+
+    fn write_atomic(&self, id: &str, content: &str) -> Result<()> {
+        let path = self.resolve(id)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("md.tmp");
+        fs::write(&tmp, content).with_context(|| format!("write {}", tmp.display()))?;
+        fs::rename(&tmp, &path).with_context(|| format!("rename into {}", path.display()))?;
         Ok(())
     }
 
@@ -94,6 +131,41 @@ impl NotesStore {
         );
         Ok(path)
     }
+}
+
+/// First path segment of a note id, or `""` for vault-root notes.
+///
+/// `dsa-python/two-pointers.md` → `dsa-python`
+/// `git.md` → `""`
+pub fn folder_of(id: &str) -> String {
+    match id.split_once('/') {
+        Some((folder, _)) => folder.to_string(),
+        None => String::new(),
+    }
+}
+
+/// Filename without `.md`, ignoring parent folders.
+///
+/// `dsa-python/two-pointers.md` → `two-pointers`
+/// `git.md` → `git`
+pub fn filename_stem(id: &str) -> String {
+    let name = id.rsplit('/').next().unwrap_or(id);
+    let lower = name.to_ascii_lowercase();
+    if let Some(stripped) = lower.strip_suffix(".md") {
+        name[..stripped.len()].to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+fn format_mtime(t: SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(t)
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
+}
+
+fn is_skipped_md_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("readme.md") || name.eq_ignore_ascii_case("index.md")
 }
 
 pub fn sanitize_title(raw: &str) -> String {
@@ -163,7 +235,7 @@ fn collect_md(root: &Path, dir: &Path, out: &mut Vec<NoteSummary>) -> Result<()>
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if !name.to_ascii_lowercase().ends_with(".md") || name.eq_ignore_ascii_case("readme.md") {
+        if !name.to_ascii_lowercase().ends_with(".md") || is_skipped_md_name(name) {
             continue;
         }
         let rel = path.strip_prefix(root).unwrap_or(&path);
@@ -194,7 +266,7 @@ fn copy_tree(src_root: &Path, from: &Path, to_root: &Path, copied: &mut usize) -
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if !name.to_ascii_lowercase().ends_with(".md") || name.eq_ignore_ascii_case("readme.md") {
+        if !name.to_ascii_lowercase().ends_with(".md") || is_skipped_md_name(name) {
             continue;
         }
         let rel = path.strip_prefix(src_root).unwrap_or(&path);
@@ -232,6 +304,7 @@ fn strip_rook_footer(input: &str) -> String {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::UNIX_EPOCH;
 
     static N: AtomicU64 = AtomicU64::new(0);
 
@@ -298,6 +371,7 @@ mod tests {
         fs::write(src.join("git.md"), "# git\n<!-- ROOK:FOOTER -->x<!-- /ROOK:FOOTER -->\n").unwrap();
         fs::write(src.join("dsa/two.md"), "# two\n").unwrap();
         fs::write(src.join("README.md"), "skip me").unwrap();
+        fs::write(src.join("INDEX.md"), "stale index").unwrap();
         let dest = tmp();
         let store = NotesStore::open(dest.clone()).unwrap();
         let n = store.seed_from(&src).unwrap();
@@ -305,7 +379,56 @@ mod tests {
         assert_eq!(store.read("git.md").unwrap().trim(), "# git");
         assert!(store.read("dsa/two.md").unwrap().contains("# two"));
         assert!(!dest.join("README.md").exists());
+        let index = fs::read_to_string(dest.join("INDEX.md")).unwrap();
+        assert!(index.contains("[git](git.md)"));
+        assert!(index.contains("[two](dsa/two.md)"));
+        assert!(!index.contains("stale index"));
         let _ = fs::remove_dir_all(src);
         let _ = fs::remove_dir_all(dest);
+    }
+
+    #[test]
+    fn folder_and_stem_helpers() {
+        assert_eq!(folder_of("dsa-python/two-pointers.md"), "dsa-python");
+        assert_eq!(filename_stem("dsa-python/two-pointers.md"), "two-pointers");
+        assert_eq!(folder_of("solid-principles/liskov-substitution.md"), "solid-principles");
+        assert_eq!(filename_stem("solid-principles/liskov-substitution.md"), "liskov-substitution");
+        assert_eq!(folder_of("git.md"), "");
+        assert_eq!(filename_stem("git.md"), "git");
+        assert_eq!(folder_of("a/b/c.md"), "a");
+        assert_eq!(filename_stem("a/b/c.md"), "c");
+    }
+
+    #[test]
+    fn list_skips_index_and_write_index_tracks_notes() {
+        let dir = tmp();
+        let store = NotesStore::open(dir.clone()).unwrap();
+        store.create("Git").unwrap();
+        store.write("nested/two-pointers.md", "# two\n").unwrap();
+        fs::write(dir.join("README.md"), "skip").unwrap();
+
+        let listed: Vec<_> = store.list().unwrap().into_iter().map(|n| n.id).collect();
+        assert!(listed.contains(&"Git.md".into()));
+        assert!(listed.contains(&"nested/two-pointers.md".into()));
+        assert!(!listed.iter().any(|id| id.eq_ignore_ascii_case("INDEX.md")));
+        assert!(!listed.iter().any(|id| id.eq_ignore_ascii_case("README.md")));
+
+        let index = fs::read_to_string(dir.join("INDEX.md")).unwrap();
+        assert!(index.contains("- [Git](Git.md) — "));
+        assert!(index.contains("- [two-pointers](nested/two-pointers.md) — "));
+
+        store.delete("Git.md").unwrap();
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        let index = fs::read_to_string(dir.join("INDEX.md")).unwrap();
+        assert!(!index.contains("Git.md"));
+        assert!(index.contains("two-pointers"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn format_mtime_is_isoish() {
+        let t = UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        assert_eq!(format_mtime(t), "2023-11-14 22:13");
     }
 }

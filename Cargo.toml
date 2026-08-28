@@ -1,23 +1,42 @@
 [package]
 name = "claudio-notes"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
+rust-version = "1.85"
 license = "MIT"
-description = "Claudio Notes — local notes for software engineers"
+description = "Claudio Notes — macOS overlay notes for Super.engineering"
 publish = false
+
+[lib]
+name = "claudio_notes"
+path = "src/lib.rs"
+
+[[bin]]
+name = "claudio-notes"
+path = "src/main.rs"
+test = false
+doctest = false
 
 [dependencies]
 anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# gpui-component's workspace git-depends on zed without a rev. Putting `rev`
+# on gpui/gpui_platform here would compile a second gpui crate and break the UI.
+# Cargo.lock pins zed to 4c763e1563523c503282394bef9c6c08d9e10457.
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", features = [
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "14359a0cdd00657eb68fa946bfd99cd83c26e002", features = [
     "tree-sitter-markdown",
     "tree-sitter-rust",
     "tree-sitter-python",
     "tree-sitter-bash",
     "tree-sitter-javascript",
 ] }
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "14359a0cdd00657eb68fa946bfd99cd83c26e002" }
+global-hotkey = "0.7"
+tray-icon = "0.21"
 
 [profile.dev]
 codegen-units = 16
