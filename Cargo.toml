@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
-description = "Claudio Notes — macOS overlay notes for Super.engineering"
+description = "Claudio Notes — a small macOS overlay notes app for learning GPUI"
 publish = false
 
 [lib]
